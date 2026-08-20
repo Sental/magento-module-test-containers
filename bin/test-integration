@@ -14,8 +14,30 @@ source "$(dirname "${BASH_SOURCE[0]}")/_bootstrap.sh"
 TARGET="${1:?usage: bin/test-integration <path under the Magento root> [phpunit args]}"
 shift || true
 
+ETC=magento/dev/tests/integration/etc
+
+# The framework ships only .dist templates, and the stock one points at
+# localhost with Adobe's sample credentials. Install ours, which uses the
+# container service names.
+#
+# Copied unconditionally: this file lives under the gitignored magento/ tree,
+# so the committed template is the only source of truth. Copying only when
+# absent silently strands an older version there after any edit.
+if ! cmp -s docker/magento/install-config-mysql.php "${ETC}/install-config-mysql.php" 2>/dev/null; then
+    echo "==> Installing integration test config (db=db, opensearch=opensearch)"
+    cp docker/magento/install-config-mysql.php "${ETC}/install-config-mysql.php"
+fi
+
 CONFIG=dev/tests/integration/phpunit.xml
 [ -f "magento/${CONFIG}" ] || CONFIG=dev/tests/integration/phpunit.xml.dist
+
+# PHPUnit chdir()s to the directory holding the -c config file, so a path
+# relative to the Magento root is then resolved against dev/tests/integration/
+# and reported as "Test file ... not found". Make it absolute.
+case "$TARGET" in
+    /*) ;;
+    *) TARGET="/var/www/html/${TARGET}" ;;
+esac
 
 exec docker compose run --rm --user "$DC_USER" php \
     php -d memory_limit=-1 vendor/bin/phpunit -c "$CONFIG" "$TARGET" "$@"

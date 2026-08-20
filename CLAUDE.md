@@ -139,6 +139,16 @@ and `bin/reset` rebuilds from scratch when the state is not worth diagnosing.
 
 ## Gotchas that have already bitten
 
+- **`tasklist.exe: not found` is never the real error.** The test framework
+  measures memory with `ps` and, in a bare `catch`, treats *any* failure as
+  "must be Windows" — then throws again, uncaught, replacing the actual error.
+  It fires during shutdown, so it can bury a **passing** run: scroll to the top
+  of the output before concluding anything. `procps` is installed to keep the
+  Linux path working; Magento has not supported Windows since 2.2.7.
+- `setup:install` validates AMQP whenever `amqp-*` params are present. This rig
+  runs no RabbitMQ, so the test install config must omit them.
+- PHPUnit `chdir()`s to the `-c` config file's directory, so test paths must be
+  absolute. `bin/test-integration` converts them; do not bypass it.
 - `composer create-project` can fail at ~99% with `curl error 18 ... HTTP/2
   stream not closed cleanly`. Retry with `COMPOSER_MAX_PARALLEL_HTTP=4`.
 - `opcache` reports as `Zend OPcache` in `php -m` — grepping for `opcache`
@@ -147,3 +157,10 @@ and `bin/reset` rebuilds from scratch when the state is not worth diagnosing.
   `include`s Magento's `nginx.conf.sample` from the install tree.
 - Legacy `@magentoDataFixture` ids are not stable. Resolve created store and
   product ids at runtime; foreign keys reject invented ones.
+
+## When an error looks wrong, it probably is
+
+Every masking failure in this rig's history hid a legible error behind an
+illegible one. Before acting on the loudest message: find the **first** error in
+the output, state whether it is the cause or merely a symptom, and say what
+would falsify that reading. Do not fix the last thing you saw.

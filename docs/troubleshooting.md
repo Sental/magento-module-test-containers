@@ -101,6 +101,52 @@ bin/mage cache:flush
 
 ## Integration tests
 
+### `tasklist.exe: not found` — read this before believing any other error
+
+A Windows executable in a Linux container looks alarming and is deeply
+misleading. It means something else failed, and this error is standing on top
+of it.
+
+`Magento\TestFramework\Helper\Memory::getRealMemoryUsage()` measures the real
+resident set size by shelling out to `ps` (it avoids `memory_get_usage()`
+because of [PHP bug 62467](https://bugs.php.net/bug.php?id=62467), which misses
+memory allocated outside the Zend allocator). The method does **no** OS
+detection whatsoever:
+
+```php
+try {
+    $result = $this->_getUnixProcessMemoryUsage($pid);   // ps --pid N --format rss
+} catch (\Magento\Framework\Exception\LocalizedException $e) {
+    $result = $this->_getWinProcessMemoryUsage($pid);    // tasklist.exe
+}
+```
+
+Any failure of the Unix command — missing `ps`, permissions, a restricted
+`/proc` — is treated as evidence of running on Windows. It then throws a second,
+uncaught exception, which replaces whatever was actually wrong. Magento has not
+supported Windows since 2.2.7 (hardcoded `/` path separators), so this branch
+can never succeed on any supported platform.
+
+The rig installs `procps` so the Linux path works and the branch is unreachable.
+If you see it anyway, `ps` is missing from the image — rebuild:
+
+```bash
+bin/dc build php
+bin/php-run ps --pid 1 --format rss --no-headers    # should print a number
+```
+
+**It fires during shutdown**, after the suite has finished, so it can bury a
+*passing* run as readily as a failing one — destroying the PHPUnit summary line
+and the exit code. Always scroll to the top of the output.
+
+### `Could not connect to the Amqp Server` / `Parameter validation failed`
+
+`setup:install` validates the AMQP connection whenever `amqp-*` parameters are
+present, and this rig runs no RabbitMQ. The framework's stock
+`install-config-mysql.php.dist` sets them; the rig's replacement deliberately
+omits them. If you have copied the `.dist` by hand, remove the `amqp-*` keys —
+or add a rabbitmq service to `docker-compose.yml`.
+
 ### First run takes forever
 
 Expected — the framework installs a complete throwaway Magento into

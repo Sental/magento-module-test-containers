@@ -114,6 +114,26 @@ not need `CREATE DATABASE`.
 > The Magento integration framework **owns** those schemas and drops/recreates
 > them on every run. Never point them at anything you care about.
 
+## Integration test configuration
+
+`docker/magento/install-config-mysql.php` is the committed source of truth for
+how the test framework installs its throwaway Magento. `bin/test-integration`
+copies it into `magento/dev/tests/integration/etc/` whenever it differs, since
+that destination lives under the gitignored `magento/` tree.
+
+It differs from the framework's `.dist` template in two ways that matter:
+
+- **Hosts are container service names** (`db`, `opensearch`), not `localhost`.
+  The tests execute inside the `php` container.
+- **No `amqp-*` keys.** `setup:install` validates the AMQP connection when they
+  are present, and this rig runs no RabbitMQ, so their presence fails the
+  install outright. Add them back only alongside a real rabbitmq service.
+
+The PHP image also installs `procps`. The test framework measures memory with
+`ps`, and on failure falls back to Windows' `tasklist.exe` — a branch that
+cannot succeed on any platform Magento still supports, and which masks the real
+error when it fires. See [Troubleshooting](troubleshooting.md).
+
 ## What is committed
 
 Everything except `magento/` and `.env`. The install is large, machine-specific

@@ -4,6 +4,11 @@ FROM php:${PHP_VERSION}-fpm-bookworm
 # Build/runtime libraries for the extensions Mage-OS 3.4 requires.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git unzip zip curl default-mysql-client \
+        # procps supplies `ps`. The integration test framework measures memory
+        # with `ps --pid N --format rss`, and on failure falls back to Windows'
+        # tasklist.exe — which surfaces as a baffling "tasklist.exe: not found"
+        # fatal that hides the real error. Keep the Linux path working.
+        procps \
         libfreetype6-dev libjpeg62-turbo-dev libpng-dev libwebp-dev \
         libicu-dev libxml2-dev libxslt1-dev libzip-dev libsodium-dev \
         libonig-dev \

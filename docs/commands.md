@@ -142,6 +142,17 @@ bin/test-integration app/code/MageOS/Blog/Test/Integration/Model/PostsByProductT
 bin/test-integration app/code/MageOS/Blog/Test/Integration --filter test_excludes_drafts
 ```
 
+Absolute container paths (`/var/www/html/app/code/...`) work too. Relative ones
+are converted before being handed to PHPUnit, because PHPUnit `chdir()`s to the
+directory holding the `-c` config file — without the conversion, a path relative
+to the Magento root gets resolved against `dev/tests/integration/` and reported
+as `Test file ... not found`.
+
+On first use the script also installs `docker/magento/install-config-mysql.php`
+into `dev/tests/integration/etc/`, replacing the framework's `.dist` template
+(which points at `localhost` with Adobe's sample credentials). It is re-copied
+whenever the committed version differs, so editing the template is enough.
+
 > **First run is slow.** The framework installs a second, throwaway Magento
 > into the `magento_integration_tests` schema. It owns and recreates that
 > schema — never repoint it at a database you care about.
