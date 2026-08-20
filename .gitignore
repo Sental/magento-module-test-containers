@@ -32,3 +32,6 @@ Thumbs.db
 /backups/
 /*.sql
 /*.sql.gz
+
+# Registry of mounted modules (machine-specific)
+/.linked-modules

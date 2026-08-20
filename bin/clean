@@ -69,6 +69,30 @@ if [ "$DO_CACHE" -eq 1 ]; then
            magento/var/log/* magento/var/report/* magento/var/tmp/* \
            magento/pub/static/frontend/* magento/pub/static/adminhtml/* 2>/dev/null || true
 
+    # Opcache lives in the FPM process's shared memory, so clearing files on
+    # disk does not touch it. `docker compose restart` sends a signal to the
+    # existing process; a stop/start creates a new one, which is the only
+    # reliable way to drop cached bytecode. This matters when module contents
+    # change under a running container — the classic "I edited the file and
+    # nothing happened".
+    echo "==> Resetting opcache (stop/start php, not restart)"
+    docker compose stop php >/dev/null 2>&1 || true
+    docker compose start php >/dev/null 2>&1 || true
+    # nginx resolves the `php` upstream once at startup and caches the IP.
+    # A restarted php container gets a NEW address, so nginx then dials a dead
+    # one and every request 502s. Restart web so it re-resolves.
+    docker compose restart web >/dev/null 2>&1 || true
+
+    # Both containers need a moment; returning before they are ready makes the
+    # next request look like a failure when it is just a race.
+    printf "    waiting for the stack"
+    for _ in $(seq 1 30); do
+        if curl -sf -o /dev/null --max-time 5 "http://localhost:${HTTP_PORT}/" 2>/dev/null; then
+            printf " ready\n"; break
+        fi
+        printf "."; sleep 2
+    done
+
     echo "    (generated code and static assets rebuild on next request)"
 fi
 

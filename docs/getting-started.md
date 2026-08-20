@@ -74,7 +74,9 @@ bin/mage setup:di:compile
 ```
 
 Arguments are `<directory under MODULES_PATH> <Vendor> <Name>`. The module is
-symlinked, not copied — edit it in its own repo and the store sees the changes.
+bind-mounted, not copied — edit it in its own repo and the store sees the
+changes immediately. (It is a mount rather than a symlink for a specific
+reason; see [Architecture](architecture.md).)
 
 Remove it again with:
 
@@ -82,7 +84,7 @@ Remove it again with:
 bin/unlink-module MageOS Blog
 ```
 
-That deletes only the symlink. Your module repo is never touched.
+That removes only the mount. Your module repo is never touched.
 
 ## What you now have
 

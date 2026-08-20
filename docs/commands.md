@@ -59,7 +59,9 @@ bin/clean --all      # all three
 
 `--cache` is safe and routine: generated code and static assets rebuild on the
 next request. It typically recovers 10–15 MB and is the right first move when
-something behaves strangely.
+something behaves strangely. It also stop/starts `php` to reset opcache (a
+`restart` signals the existing process and would not), restarts `web` so nginx
+re-resolves the new php IP, and waits for the stack to answer before returning.
 
 `--tests` matters more than it looks — the integration framework installs a
 complete Magento (~400 tables) into `magento_integration_tests` and never drops
@@ -71,19 +73,25 @@ it. The next test run reinstalls, so expect one slow run afterwards.
 
 ## `bin/link-module <dir> <Vendor> <Name>`
 
-Symlinks a module from `$MODULES_PATH` into `magento/app/code/`.
+Bind-mounts a module from `$MODULES_PATH` into `app/code`, records it in
+`.linked-modules`, regenerates `docker-compose.override.yml`, and recreates the
+`php` and `web` containers.
 
 ```bash
 bin/link-module module-blog MageOS Blog
-# magento/app/code/MageOS/Blog -> /srv/modules/module-blog
+# /srv/modules/module-blog -> /var/www/html/app/code/MageOS/Blog
 ```
 
-Warns if the source has no `registration.php`. Prints the enable/upgrade
-commands to run next.
+It is a mount, not a symlink — a symlinked module registers a path outside the
+Magento root and Magento then refuses to render its templates. See
+[Architecture](architecture.md). Editing stays live in both directions.
+
+Warns if the source has no `registration.php`, verifies the mount is visible
+inside the container, and prints the enable/upgrade commands to run next.
 
 ## `bin/unlink-module <Vendor> <Name>`
 
-Disables the module, drops its tables, and removes the symlink — in that order,
+Disables the module, drops its tables, and removes the mount — in that order,
 which matters.
 
 ```bash
@@ -91,9 +99,8 @@ bin/unlink-module MageOS Blog
 bin/unlink-module MageOS Blog --keep-tables   # leave the data alone
 ```
 
-Refuses to delete a real directory, so it can never eat a module that was
-copied in rather than linked. `rm` on a symlink removes the link, never the
-target, so the module's own repo is safe either way.
+Only the mount is removed — the module's own repo is never touched. A leftover
+empty mount point under `app/code` is cleaned up afterwards.
 
 ### Why the order matters
 
@@ -103,9 +110,9 @@ sequence is:
 
 1. `module:disable` — module stays in `config.php`, marked `0`
 2. `setup:upgrade` — declarative schema sees its tables are no longer declared and **drops them**
-3. remove the symlink
+3. remove the mount
 
-Remove the symlink first and the tables are stranded: Magento no longer knows
+Unmount first and the tables are stranded: Magento no longer knows
 they exist, and nothing will clean them up. This is handled for you, but it is
 worth knowing if you ever unlink something by hand.
 
@@ -182,7 +189,8 @@ directory.
 bin/dc ps
 bin/dc logs -f web
 bin/dc logs --tail 100 php
-bin/dc restart php
+bin/dc restart php    # NB: signals the process; does NOT clear opcache
+bin/dc stop php && bin/dc start php && bin/dc restart web   # this does
 bin/dc up -d
 bin/dc down          # stop, keep data
 bin/dc down -v       # stop and DELETE database + search index
@@ -215,5 +223,5 @@ tail -f magento/var/log/exception.log
 Full reset:
 
 ```bash
-bin/dc down -v && rm -rf magento && bin/install
+bin/reset            # or bin/reset --db-only to keep the vendor tree
 ```

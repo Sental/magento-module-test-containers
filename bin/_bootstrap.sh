@@ -32,3 +32,48 @@ DC_USER="$(id -u):$(id -g)"
 export DC_USER
 
 dc_run() { docker compose run --rm --user "$DC_USER" "$@"; }
+
+# Registry of linked modules: one "<dir> <Vendor> <Name>" line each.
+LINKED_REGISTRY=.linked-modules
+
+# Regenerate docker-compose.override.yml from the registry.
+#
+# Modules are bind-mounted straight into app/code rather than symlinked.
+# registration.php calls ComponentRegistrar::register(..., __DIR__), and PHP
+# resolves __DIR__ through symlinks — so a symlinked module registers its REAL
+# path, outside BP. Magento's Filesystem PathValidator then refuses every
+# template it owns:
+#
+#   ValidatorException: Path "/srv/modules/module-blog/view/.../view.phtml"
+#   cannot be used with directory "/var/www/html/"
+#
+# Class autoloading, db_schema and DI all work regardless, so the breakage only
+# shows when a .phtml renders. A bind mount gives the module a genuine path
+# inside the Magento root, and __DIR__ then lands inside BP.
+render_override() {
+    local out=docker-compose.override.yml
+
+    if [ ! -s "$LINKED_REGISTRY" ]; then
+        rm -f "$out"
+        return 0
+    fi
+
+    {
+        echo "# GENERATED FILE — do not edit by hand."
+        echo "# Managed by bin/link-module and bin/unlink-module."
+        echo "#"
+        echo "# Modules are bind-mounted into app/code, not symlinked: registration.php"
+        echo "# uses __DIR__, which resolves symlinks, so a symlinked module registers a"
+        echo "# path outside BP and Magento's PathValidator rejects its templates."
+        echo "services:"
+        local svc dir vendor name
+        for svc in php web; do
+            echo "  ${svc}:"
+            echo "    volumes:"
+            while read -r dir vendor name; do
+                [ -z "${dir:-}" ] && continue
+                echo "      - ${MODULES_PATH}/${dir}:/var/www/html/app/code/${vendor}/${name}"
+            done < "$LINKED_REGISTRY"
+        done
+    } > "$out"
+}

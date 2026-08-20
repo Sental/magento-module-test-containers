@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Symlink a module from $MODULES_PATH into the test install's app/code.
+# Mount a module from $MODULES_PATH into the test install's app/code.
 #
 #   bin/link-module module-blog MageOS Blog
 #   bin/link-module <dir-under-MODULES_PATH> <Vendor> <Name>
 #
-# The link is written with the module's ABSOLUTE host path, which resolves
-# inside the container too because docker-compose.yml bind-mounts
-# $MODULES_PATH at the identical path. That is the whole trick that lets the
-# rig test a module living outside this directory.
+# The module is BIND-MOUNTED at /var/www/html/app/code/<Vendor>/<Name>, not
+# symlinked. See render_override() in bin/_bootstrap.sh for why symlinks break
+# Magento template rendering. You still edit the module in its own repo — the
+# mount is live in both directions.
 source "$(dirname "${BASH_SOURCE[0]}")/_bootstrap.sh"
 
 DIR="${1:?usage: bin/link-module <dir> <Vendor> <Name>}"
@@ -20,12 +20,36 @@ DEST="magento/app/code/${VENDOR}/${NAME}"
 [ -d "$SRC" ] || { echo "No such module directory: $SRC" >&2; exit 1; }
 [ -f "$SRC/registration.php" ] || echo "warning: $SRC has no registration.php" >&2
 
-mkdir -p "$(dirname "$DEST")"
-ln -sfn "$SRC" "$DEST"
+# Clear any legacy symlink from the pre-bind-mount design.
+if [ -L "$DEST" ]; then
+    echo "==> Removing legacy symlink at $DEST"
+    rm -f "$DEST"
+fi
 
-echo "linked  $DEST -> $SRC"
+# The mount point must exist on the host side of the ./magento bind mount,
+# otherwise Docker creates it as root.
+mkdir -p "$DEST"
+
+touch "$LINKED_REGISTRY"
+if ! grep -qxF "${DIR} ${VENDOR} ${NAME}" "$LINKED_REGISTRY"; then
+    echo "${DIR} ${VENDOR} ${NAME}" >> "$LINKED_REGISTRY"
+fi
+
+render_override
+echo "==> Recreating php and web with the new mount"
+docker compose up -d php web >/dev/null
+
+# Prove the module is visible at a path INSIDE the Magento root, which is the
+# whole point of the bind mount.
+if docker compose run --rm --user "$DC_USER" --no-deps php \
+        test -f "app/code/${VENDOR}/${NAME}/registration.php" >/dev/null 2>&1; then
+    echo "mounted  app/code/${VENDOR}/${NAME}  ->  ${SRC}"
+else
+    echo "MOUNT FAILED: app/code/${VENDOR}/${NAME}/registration.php not visible in the container" >&2
+    exit 1
+fi
+
 echo
 echo "next:"
 echo "  bin/mage module:enable ${VENDOR}_${NAME}"
 echo "  bin/mage setup:upgrade"
-echo "  bin/mage setup:di:compile"

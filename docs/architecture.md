@@ -42,45 +42,110 @@ module misbehaves. Magento's built-in file cache and cron-via-CLI cover the
 cases that matter here. Add services to `docker-compose.yml` if a module under
 test genuinely needs them.
 
-## The symlink mechanism
+## The module mount mechanism
 
-This is the part worth understanding, because it is what makes the rig useful
-and it is not obvious.
+This is the part worth understanding, because the obvious approach to it is
+wrong in a way that takes hours to diagnose.
 
-Modules are never copied into the install. `bin/link-module` writes an
-**absolute** symlink:
-
-```
-magento/app/code/MageOS/Blog -> /srv/modules/module-blog
-```
-
-A symlink is just a stored string. `/srv/modules/module-blog` means
-nothing inside a container that has never heard of that path, so the link would
-dangle and Magento would not find the module.
-
-The fix is to mount the modules directory at **the identical path** inside the
-container:
+Modules are never copied in. `bin/link-module` records the module in
+`.linked-modules` and regenerates `docker-compose.override.yml`, which
+bind-mounts it directly into `app/code`:
 
 ```yaml
-volumes:
-  - ./magento:/var/www/html
-  - ${MODULES_PATH}:${MODULES_PATH}     # /srv/modules -> /srv/modules
+services:
+  php:
+    volumes:
+      - /srv/modules/module-blog:/var/www/html/app/code/MageOS/Blog
+  web:
+    volumes:
+      - /srv/modules/module-blog:/var/www/html/app/code/MageOS/Blog
 ```
 
-Now the same absolute path is valid on both sides, the link resolves in both
-places, and you get to edit the module in its own git repo while a real store
-loads it live.
+Both `php` and `web` need it — nginx serves module static assets directly.
 
-Both `php` and `web` mount it, because nginx serves static assets straight from
-the module directory.
+### Why not a symlink
+
+A symlink from `app/code/Vendor/Name` to the module repo is the natural first
+design. It was this rig's original design, and it is broken.
+
+`registration.php` calls `ComponentRegistrar::register(..., __DIR__)`, and PHP
+resolves `__DIR__` through symlinks. The module therefore registers its **real**
+path, outside the Magento root:
+
+```text
+registered at: /srv/modules/module-blog
+BP:            /var/www/html
+inside BP?     NO
+```
+
+`Magento\Framework\View\Element\Template\File\Validator::isValid()` then calls
+`$this->getRootDirectory()->getRelativePath($filename)`, and the filesystem
+`PathValidator` throws:
+
+```text
+ValidatorException: Path "/srv/modules/module-blog/view/frontend/templates/post/view.phtml"
+cannot be used with directory "/var/www/html/"
+```
+
+What makes this expensive is how much still works. Autoloading, `db_schema.xml`,
+`di.xml` and layout XML parsing are all path-agnostic — tables are created,
+`module:status` says enabled, `setup:upgrade` succeeds, unit tests pass. It only
+fails when a `.phtml` renders, as an HTTP 500 naming a file that plainly exists.
+
+**`dev/template/allow_symlink` does not fix it.** That setting is the Magento 1
+`allow_symlinks` descendant and it is the obvious thing to reach for. Look at
+where it is actually used:
+
+```php
+($this->isPathInDirectories($filename, $this->_compiledDir)
+    || $this->isPathInDirectories($filename, $this->moduleDirs)
+    || $this->isPathInDirectories($filename, $this->_themesDir)
+    || $this->_isAllowSymlinks)
+&& $this->getRootDirectory()->isFile($this->getRootDirectory()->getRelativePath($filename));
+```
+
+It only ORs into the first clause — which already passes, because `moduleDirs`
+contains the module's registered path. The exception comes from
+`getRelativePath()` in the second clause, which runs unconditionally. Tested on
+this rig: `allow_symlink=1` plus a symlink still returns HTTP 500 with the
+identical exception.
+
+Bind-mounting gives the module a genuine path inside the Magento root, so
+`__DIR__` lands inside `BP` and the validator is satisfied.
 
 Consequences worth knowing:
 
-- **`MODULES_PATH` must be an absolute path**, and the same one used when
-  linking. `_bootstrap.sh` fails early if the directory does not exist.
-- **Moving a module repo breaks its link.** Re-run `bin/link-module`.
-- **Composer-installed copies win.** If the same module is also in
-  `magento/vendor/`, remove it or Magento may load that one instead.
+- **Adding or removing a module recreates `php` and `web`.** Volumes are fixed
+  at container creation; `docker compose restart` will not pick up a new mount.
+  The scripts use `up -d`, which recreates on config change.
+- **`docker-compose.override.yml` is generated.** Do not hand-edit it. Both it
+  and `.linked-modules` are gitignored.
+- **`MODULES_PATH` must be absolute.** `_bootstrap.sh` fails early otherwise.
+- **Moving a module repo breaks its mount.** Re-run `bin/link-module`.
+- **Composer-installed copies win.** If the module is also in `magento/vendor/`,
+  remove it or Magento may load that one instead.
+
+## Caching when files change underneath
+
+Module contents change under a running container, so the PHP image is tuned not
+to trust cached paths or bytecode for long:
+
+- `opcache.validate_timestamps = 1` with `revalidate_freq = 0` — every request
+  stats the file and acts immediately.
+- `realpath_cache_ttl = 10` seconds, not the production default. A long TTL is
+  the usual cause of "I changed the file and nothing happened", and it gets far
+  worse when mounts come and go.
+
+Opcache still lives in the FPM **process's** shared memory, so deleting files on
+disk does not clear it. Only a new process does — and `docker compose restart`
+signals the existing one rather than replacing it. `bin/clean --cache` does a
+stop/start instead.
+
+One trap that follows: nginx resolves the `php` upstream once at startup and
+caches the IP. A restarted php container gets a **new** address, and every
+request then 502s against the old one. Anything that restarts `php` must also
+restart `web`; `bin/clean` does, and waits for the stack to answer before
+returning.
 
 ## PHP image
 

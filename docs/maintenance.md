@@ -33,7 +33,7 @@ brings all 11 back.
 
 The one trap is ordering. Magento can only drop tables for a module it still
 knows about, and it learns that from `app/etc/config.php`. If you delete the
-symlink *first*, the module vanishes from Magento's view with its tables still
+mount *first*, the module vanishes from Magento's view with its tables still
 in place and nothing left to attribute them to. `bin/unlink-module` does it in
 the safe order for you.
 
@@ -86,7 +86,7 @@ difference.
 
 `bin/reset` names everything it will destroy and requires you to type `reset`.
 Linked modules are listed before you confirm, and their repos are never touched
-— only symlinks are removed.
+— only mounts are removed.
 
 ## Routine
 

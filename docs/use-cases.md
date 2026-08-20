@@ -12,13 +12,15 @@ bin/mage setup:upgrade
 
 ## See a storefront change in a real store
 
-The reason for the symlink. Edit the module in its own repo, reload the page.
+The reason the rig exists. Edit the module in its own repo, reload the page.
 
 ```bash
 vim /srv/modules/module-blog/view/frontend/templates/post/card.phtml
 bin/mage cache:flush
 open http://localhost:8380/blog
 ```
+
+The module is bind-mounted into `app/code`, so edits are live with no sync step.
 
 In developer mode, `.phtml` and layout XML changes need only a cache flush.
 Changes to **DI, `db_schema.xml`, or `di.xml`** need more:

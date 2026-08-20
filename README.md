@@ -24,24 +24,41 @@ bin/mage setup:upgrade
 
 ## The one idea worth understanding
 
-Modules are **not copied in**. They are symlinked from wherever they already
-live, so you edit code in its own repo and the store picks it up immediately.
-
-```
-magento/app/code/MageOS/Blog -> /srv/modules/module-blog
-```
-
-That absolute symlink would normally break inside a container, because
-`/srv/modules` doesn't exist there. The compose file mounts it at the
-*same path on both sides*, so the link resolves either way:
+Modules are **not copied in**. Each is bind-mounted from wherever it already
+lives straight into `app/code`, so you edit code in its own repo and the store
+picks it up immediately:
 
 ```yaml
-volumes:
-  - ./magento:/var/www/html
-  - ${MODULES_PATH}:${MODULES_PATH}
+services:
+  php:
+    volumes:
+      - /srv/modules/module-blog:/var/www/html/app/code/MageOS/Blog
 ```
 
-Point `MODULES_PATH` anywhere; nothing else needs to change.
+`bin/link-module` generates that into `docker-compose.override.yml` and
+recreates the containers. Point `MODULES_PATH` anywhere; nothing else changes.
+
+### Why a mount and not a symlink
+
+A symlink is the obvious approach and it **silently breaks Magento**.
+
+`registration.php` calls `ComponentRegistrar::register(..., __DIR__)`, and PHP
+resolves `__DIR__` through symlinks. A symlinked module therefore registers its
+*real* path — outside the Magento root — and Magento's filesystem
+`PathValidator` rejects every template it owns:
+
+```
+ValidatorException: Path "/srv/modules/module-blog/view/frontend/templates/post/view.phtml"
+cannot be used with directory "/var/www/html/"
+```
+
+The cruel part is how late it fails. Class autoloading, `db_schema.xml`, DI and
+layout XML parsing all work perfectly with a symlink — tables get created, the
+module reports as enabled, unit tests pass. It only falls over when a `.phtml`
+renders, as an HTTP 500 that names a path that plainly exists.
+
+A bind mount gives the module a genuine path inside the Magento root, so
+`__DIR__` lands inside `BP` and the validator is satisfied.
 
 ## Documentation
 
@@ -50,7 +67,7 @@ Point `MODULES_PATH` anywhere; nothing else needs to change.
 | [Getting started](docs/getting-started.md) | First install, what to expect, verifying it worked |
 | [Commands](docs/commands.md) | Every `bin/` script, with examples |
 | [Use cases](docs/use-cases.md) | Real workflows: test a module, run integration tests, check FPC, reproduce a bug |
-| [Architecture](docs/architecture.md) | Services, ports, the symlink mechanism, what was deliberately left out |
+| [Architecture](docs/architecture.md) | Services, ports, the module mount mechanism, what was deliberately left out |
 | [Maintenance](docs/maintenance.md) | What accumulates, what cleans itself, reset vs clean |
 | [Troubleshooting](docs/troubleshooting.md) | Things that go wrong and how to fix them |
 

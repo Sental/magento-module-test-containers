@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
-# Remove a module symlink from the test install. The module's own repo is
-# untouched — `rm` on a symlink removes the link, never the target.
+# Unmount a module from the test install. The module's own repo is untouched.
 #
 #   bin/unlink-module MageOS Blog
 #   bin/unlink-module MageOS Blog --keep-tables
 #
 # ORDER MATTERS. Magento's declarative schema drops a module's tables during
-# `setup:upgrade`, but only while the module is still listed in
-# app/etc/config.php. So we disable, upgrade (tables get dropped), and only
-# then remove the symlink. Removing the link first strands the tables.
+# setup:upgrade, but only while the module is still listed in app/etc/config.php
+# AND still mounted. So we disable, upgrade (tables get dropped), and only then
+# remove the mount.
 source "$(dirname "${BASH_SOURCE[0]}")/_bootstrap.sh"
 
 VENDOR="${1:?usage: bin/unlink-module <Vendor> <Name> [--keep-tables]}"
@@ -19,12 +18,10 @@ KEEP_TABLES=0
 MODULE="${VENDOR}_${NAME}"
 DEST="magento/app/code/${VENDOR}/${NAME}"
 
-if [ ! -L "$DEST" ]; then
-    if [ -d "$DEST" ]; then
-        echo "$DEST is a real directory, not a symlink — refusing to delete it." >&2
-        exit 1
-    fi
-    echo "Nothing linked at $DEST"
+if [ ! -s "$LINKED_REGISTRY" ] || ! grep -qE "^\S+ ${VENDOR} ${NAME}$" "$LINKED_REGISTRY"; then
+    echo "Nothing mounted for ${MODULE}"
+    # Tidy a stale symlink from the old design if one is lying around.
+    [ -L "$DEST" ] && rm -f "$DEST" && echo "removed legacy symlink at $DEST"
     exit 0
 fi
 
@@ -40,9 +37,17 @@ else
     echo "==> Skipping setup:upgrade — tables left in place (--keep-tables)"
 fi
 
-rm -f "$DEST"
+grep -vE "^\S+ ${VENDOR} ${NAME}$" "$LINKED_REGISTRY" > "${LINKED_REGISTRY}.tmp" || true
+mv "${LINKED_REGISTRY}.tmp" "$LINKED_REGISTRY"
+
+render_override
+echo "==> Recreating php and web without the mount"
+docker compose up -d php web >/dev/null
+
+# Now that nothing is mounted there, the leftover empty directory can go.
+rmdir "$DEST" 2>/dev/null || true
 rmdir "magento/app/code/${VENDOR}" 2>/dev/null || true
 
-echo "unlinked $DEST"
+echo "unmounted ${MODULE}"
 [ "$KEEP_TABLES" -eq 1 ] && echo "note: ${MODULE}'s tables remain; bin/clean --status will show them"
 exit 0

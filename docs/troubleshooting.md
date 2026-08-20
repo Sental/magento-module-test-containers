@@ -55,7 +55,7 @@ bin/php-run ls -la app/code/MageOS/
 bin/php-run test -f app/code/MageOS/Blog/registration.php && echo OK
 ```
 
-If that fails, `MODULES_PATH` in `.env` doesn't match the path the symlink was
+If that fails, `MODULES_PATH` in `.env` doesn't match the path the mount was
 written with. Re-link:
 
 ```bash
@@ -79,6 +79,23 @@ bin/php-run ls magento/vendor/<vendor>/ 2>/dev/null
 bin/php-run composer remove <vendor>/<package>
 ```
 
+### HTTP 500: `Path ... cannot be used with directory "/var/www/html/"`
+
+The module is reachable through a **symlink** rather than a bind mount.
+`registration.php` uses `__DIR__`, PHP resolves that through symlinks, so the
+module registers a path outside the Magento root and `PathValidator` refuses
+its templates. Everything else — schema, DI, autoloading — works, which is why
+this only appears when a page renders.
+
+`dev/template/allow_symlink` does **not** help; it feeds a clause of the
+template validator that already passes. Re-link properly:
+
+```bash
+bin/link-module module-blog MageOS Blog
+```
+
+See [Architecture](architecture.md) for the full explanation.
+
 ### Code changes don't show up
 
 Escalating order:
@@ -87,8 +104,25 @@ Escalating order:
 bin/mage cache:flush
 bin/mage setup:upgrade                 # after db_schema/di changes
 bin/mage setup:di:compile              # after constructor/DI changes
-rm -rf magento/generated/* magento/var/cache/* magento/var/view_preprocessed/*
+bin/clean --cache                      # + resets opcache (stop/start php)
 ```
+
+**Opcache is the one people miss.** It lives in the FPM process's shared
+memory, so deleting files on disk does nothing to it, and `docker compose
+restart php` only signals the existing process. Only a new process drops the
+cached bytecode:
+
+```bash
+bin/dc stop php && bin/dc start php && bin/dc restart web
+```
+
+The `web` restart is not optional: nginx caches the `php` upstream IP at
+startup, and a restarted php container gets a new address — without it every
+request 502s. `bin/clean --cache` does all of this and waits for the stack.
+
+This bites hardest when a module's contents change under a running container.
+The image sets `realpath_cache_ttl = 10` and `opcache.revalidate_freq = 0` to
+reduce it, but a full process restart is the only guarantee.
 
 Static assets in developer mode:
 
@@ -206,7 +240,6 @@ sudo chown -R "$(id -u):$(id -g)" magento
 Cheaper than debugging a confused install:
 
 ```bash
-bin/dc down -v
-rm -rf magento
-bin/install
+bin/reset --db-only    # keep the vendor tree, wipe data (~10 min)
+bin/reset              # everything (~25 min)
 ```

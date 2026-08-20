@@ -34,8 +34,8 @@ Always from the rig root. Never `cd` into `magento/` to run things.
 
 ```bash
 bin/install [--no-sample-data] [--force]   # build the rig
-bin/link-module <dir> <Vendor> <Name>      # symlink a module in
-bin/unlink-module <Vendor> <Name>          # disable, drop tables, remove symlink
+bin/link-module <dir> <Vendor> <Name>      # bind-mount a module in
+bin/unlink-module <Vendor> <Name>          # disable, drop tables, unmount
 bin/mage <bin/magento args>                # e.g. bin/mage cache:flush
 bin/php-run <cmd>                          # arbitrary command in the php container
 bin/test-integration <path> [phpunit args] # integration tests
@@ -52,24 +52,29 @@ bin/test-integration app/code/MageOS/Blog/Test/Integration
 bin/test-integration app/code/MageOS/Blog/Test/Integration --filter test_name
 ```
 
-## The symlink mechanism — do not break this
+## The module mount mechanism — do not break this
 
-Modules are symlinked, not copied:
-
-```
-magento/app/code/MageOS/Blog -> /srv/modules/module-blog
-```
-
-That absolute path only resolves inside the container because
-`docker-compose.yml` bind-mounts `${MODULES_PATH}` **at the identical path**:
+Modules are **bind-mounted** into `app/code`, not symlinked:
 
 ```yaml
-- ${MODULES_PATH}:${MODULES_PATH}
+- /srv/modules/module-blog:/var/www/html/app/code/MageOS/Blog
 ```
 
-If you remove or rename that mount, every linked module silently disappears
-from Magento. Both `php` and `web` need it — nginx serves module static assets
-directly.
+`bin/link-module` generates this into `docker-compose.override.yml` (from the
+`.linked-modules` registry) and recreates `php` and `web`.
+
+**Never replace this with a symlink.** `registration.php` uses `__DIR__`, PHP
+resolves that through symlinks, so a symlinked module registers a path outside
+`BP` and `PathValidator` rejects every template it owns — an HTTP 500 naming a
+file that exists. Autoloading, schema, DI and layout all still work, so the
+breakage only shows when a `.phtml` renders.
+
+`dev/template/allow_symlink` does **not** fix it — verified. It only ORs into a
+clause of `Template\File\Validator::isValid()` that already passes; the throw
+comes from `getRelativePath()` in the unconditional second clause.
+
+Adding or removing a module requires container **recreation** (`up -d`), not
+`restart` — volumes are fixed at creation time.
 
 ## Verifying a change actually took effect
 
@@ -129,9 +134,9 @@ in `app/etc/config.php`:
 
 1. `module:disable`
 2. `setup:upgrade` ← tables dropped here
-3. remove the symlink
+3. remove the mount
 
-Delete the symlink first and the tables are stranded with nothing to attribute
+Unmount first and the tables are stranded with nothing to attribute
 them to. `bin/unlink-module` already does this correctly; use it.
 
 For anything else, `bin/clean` (bare, read-only) reports what has accumulated,
@@ -155,6 +160,10 @@ and `bin/reset` rebuilds from scratch when the state is not worth diagnosing.
   wrongly suggests it is missing.
 - `web` cannot start before the install exists, because its nginx config
   `include`s Magento's `nginx.conf.sample` from the install tree.
+- nginx caches the `php` upstream IP at startup. Restarting `php` alone gives it
+  a new address and every request 502s — restart `web` too.
+- Opcache lives in the FPM process, so `docker compose restart` (a signal) does
+  not clear it. Stop/start creates a new process, which does.
 - Legacy `@magentoDataFixture` ids are not stable. Resolve created store and
   product ids at runtime; foreign keys reject invented ones.
 

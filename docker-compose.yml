@@ -65,9 +65,9 @@ services:
       MAGE_DB_TEST_NAME: ${DB_TEST_NAME}
     volumes:
       - ./magento:/var/www/html
-      # Same path inside and out, so an absolute symlink such as
-      #   app/code/MageOS/Blog -> /srv/modules/module-blog
-      # resolves identically on both sides of the container boundary.
+      # Mounted at the same path inside and out. Individual modules are ALSO
+      # bind-mounted into app/code by bin/link-module (see
+      # docker-compose.override.yml) — that is what Magento actually loads.
       - ${MODULES_PATH}:${MODULES_PATH}
       - composer-cache:/composer
     depends_on:
