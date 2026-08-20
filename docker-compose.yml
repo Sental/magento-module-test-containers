@@ -65,10 +65,12 @@ services:
       MAGE_DB_TEST_NAME: ${DB_TEST_NAME}
     volumes:
       - ./magento:/var/www/html
-      # Mounted at the same path inside and out. Individual modules are ALSO
-      # bind-mounted into app/code by bin/link-module (see
-      # docker-compose.override.yml) — that is what Magento actually loads.
-      - ${MODULES_PATH}:${MODULES_PATH}
+      # Modules are mounted individually into app/code by bin/link-module, via
+      # the generated docker-compose.override.yml. MODULES_PATH is deliberately
+      # NOT mounted wholesale: doing so lets a stray symlink under app/code
+      # resolve at the filesystem level while Magento still rejects it, which
+      # produces a module that installs and creates tables but 500s on render.
+      # Without the mount, such a symlink dangles immediately and visibly.
       - composer-cache:/composer
     depends_on:
       db:
@@ -82,7 +84,7 @@ services:
       - "${HTTP_PORT}:80"
     volumes:
       - ./magento:/var/www/html
-      - ${MODULES_PATH}:${MODULES_PATH}
+      # As above — module mounts arrive via docker-compose.override.yml.
       - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       - php

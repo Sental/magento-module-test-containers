@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 # Tear the rig down to nothing and rebuild it from .env + docker-compose.yml.
 #
-#   bin/reset              # full: volumes, install, everything
+#   bin/reset              # full: containers, volumes, install
+#   bin/reset --images     # also rebuild this project's PHP image from scratch
 #   bin/reset --db-only    # keep the vendor tree; wipe data and reinstall
 #   bin/reset --no-sample-data
 #   bin/reset --yes        # skip the confirmation prompt
+#
+# SCOPE: only ever touches this compose project. --images uses `--rmi local`,
+# which removes images the project BUILT (modtest-php) and leaves pulled base
+# images (mariadb, opensearch, nginx) alone — those are shared with other
+# stacks on this machine. Nothing here prunes anything globally.
 #
 # This is the blunt instrument. Everything in the rig is reproducible from
 # committed files, so when the install has drifted into a confusing state it is
@@ -14,11 +20,13 @@ source "$(dirname "${BASH_SOURCE[0]}")/_bootstrap.sh"
 
 DB_ONLY=0
 ASSUME_YES=0
+DROP_IMAGES=0
 INSTALL_ARGS=()
 
 for arg in "$@"; do
     case "$arg" in
         --db-only) DB_ONLY=1 ;;
+        --images) DROP_IMAGES=1 ;;
         --yes|-y) ASSUME_YES=1 ;;
         --no-sample-data) INSTALL_ARGS+=(--no-sample-data) ;;
         *) echo "unknown option: $arg" >&2; exit 1 ;;
@@ -44,6 +52,11 @@ if [ "$DB_ONLY" -eq 1 ]; then
 else
     echo "  - all containers and volumes (database, search index, composer cache)"
     echo "  - the entire magento/ tree ($(du -sh magento 2>/dev/null | cut -f1))"
+    if [ "$DROP_IMAGES" -eq 1 ]; then
+        echo "  - this project's built PHP image (rebuilt from the Dockerfile)"
+        echo "    NOT touched: pulled base images (mariadb, opensearch, nginx),"
+        echo "    which are shared with other stacks on this machine."
+    fi
 fi
 if [ ${#LINKED[@]} -gt 0 ]; then
     echo
@@ -60,8 +73,22 @@ if [ "$ASSUME_YES" -eq 0 ]; then
 fi
 
 echo
-echo "==> Stopping containers and removing volumes"
-docker compose down -v --remove-orphans
+if [ "$DROP_IMAGES" -eq 1 ]; then
+    echo "==> Stopping containers, removing volumes AND this project's built image"
+    # --rmi local: only images this project built (no custom tag). Pulled base
+    # images stay — they are shared with other stacks on this machine.
+    docker compose down -v --remove-orphans --rmi local
+
+    # Removing the image is not enough to re-execute the Dockerfile: BuildKit
+    # still holds the layer cache and will restore a bit-identical image,
+    # timestamp and all. --no-cache is what actually proves the build works
+    # from scratch — which is the entire point of asking for --images.
+    echo "==> Rebuilding the PHP image with --no-cache"
+    docker compose build --no-cache php
+else
+    echo "==> Stopping containers and removing volumes"
+    docker compose down -v --remove-orphans
+fi
 
 # Drop the module mounts for the rebuild. Leaving them in place would have
 # Docker create mount points inside a magento/ tree that does not exist yet —

@@ -36,6 +36,17 @@ fi
 db() { docker compose exec -T db mariadb -uroot -p"${DB_ROOT_PASSWORD}" "$@" 2>/dev/null; }
 
 if [ "$DO_STATUS" -eq 1 ]; then
+    echo "== Mounted modules =="
+    if [ -s "$LINKED_REGISTRY" ]; then
+        while read -r dir vendor name; do
+            [ -z "${dir:-}" ] && continue
+            printf "  %-24s %s\n" "${vendor}_${name}" "${MODULES_PATH}/${dir}"
+        done < "$LINKED_REGISTRY"
+    else
+        echo "  (none)"
+    fi
+    echo
+
     echo "== Filesystem =="
     du -sh magento/var magento/generated magento/pub/static 2>/dev/null || echo "  (no install)"
     echo
