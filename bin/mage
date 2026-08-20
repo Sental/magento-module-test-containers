@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# bin/mage cache:flush   ->   bin/magento cache:flush inside the container
+source "$(dirname "${BASH_SOURCE[0]}")/_bootstrap.sh"
+exec docker compose run --rm --user "$DC_USER" php php bin/magento "$@"

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Raw docker compose, always from the rig root.
+#   bin/dc ps
+#   bin/dc logs -f web
+#   bin/dc down -v
+source "$(dirname "${BASH_SOURCE[0]}")/_bootstrap.sh"
+exec docker compose "$@"

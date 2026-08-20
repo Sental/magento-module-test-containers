@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Reclaim space without rebuilding. For the blunt instrument, see bin/reset.
+#
+#   bin/clean              # report what has accumulated (read-only default)
+#   bin/clean --cache      # caches, generated code, logs, reports, static
+#   bin/clean --tests      # drop and recreate the integration-test schemas
+#   bin/clean --search     # delete stale OpenSearch indices, then reindex
+#   bin/clean --all        # all three
+#
+# Every destructive action needs an explicit flag. Running bare only reports.
+#
+# Note on module tables: you do not need this to remove them. Magento's
+# declarative schema drops a module's tables during `setup:upgrade`, provided
+# the module is still listed in app/etc/config.php when it runs — which is what
+# bin/unlink-module does for you, in that order.
+source "$(dirname "${BASH_SOURCE[0]}")/_bootstrap.sh"
+
+DO_CACHE=0; DO_TESTS=0; DO_SEARCH=0; DO_STATUS=0
+
+for arg in "$@"; do
+    case "$arg" in
+        --status) DO_STATUS=1 ;;
+        --cache) DO_CACHE=1 ;;
+        --tests) DO_TESTS=1 ;;
+        --search) DO_SEARCH=1 ;;
+        --all) DO_CACHE=1; DO_TESTS=1; DO_SEARCH=1 ;;
+        *) echo "unknown option: $arg" >&2; exit 1 ;;
+    esac
+done
+
+# No destructive flag given? Report only. Deleting must always be asked for.
+if [ "$DO_CACHE" -eq 0 ] && [ "$DO_TESTS" -eq 0 ] && [ "$DO_SEARCH" -eq 0 ]; then
+    DO_STATUS=1
+fi
+
+db() { docker compose exec -T db mariadb -uroot -p"${DB_ROOT_PASSWORD}" "$@" 2>/dev/null; }
+
+if [ "$DO_STATUS" -eq 1 ]; then
+    echo "== Filesystem =="
+    du -sh magento/var magento/generated magento/pub/static 2>/dev/null || echo "  (no install)"
+    echo
+    echo "== Databases =="
+    db -e "SELECT table_schema AS 'schema', COUNT(*) AS tables,
+             ROUND(SUM(data_length+index_length)/1024/1024,1) AS mb
+           FROM information_schema.tables
+           WHERE table_schema NOT IN
+             ('information_schema','performance_schema','mysql','sys')
+           GROUP BY table_schema ORDER BY mb DESC;" || echo "  (db not running)"
+    echo
+    echo "== OpenSearch indices =="
+    curl -s --max-time 10 "http://localhost:${OPENSEARCH_PORT}/_cat/indices?h=index,store.size&s=index" \
+        || echo "  (opensearch not running)"
+    echo
+    echo "== Docker volumes =="
+    docker system df -v 2>/dev/null | awk -v p="${COMPOSE_PROJECT_NAME}_" \
+        'index($1,p)==1 {printf "  %-40s %s\n", $1, $3}'
+    echo
+    echo "Actions: --cache | --tests | --search | --all     Rebuild instead: bin/reset"
+    exit 0
+fi
+
+if [ "$DO_CACHE" -eq 1 ]; then
+    echo "==> Flushing Magento caches"
+    docker compose run --rm --user "$DC_USER" php php bin/magento cache:flush || true
+
+    echo "==> Removing generated code, caches, logs, reports, preprocessed views"
+    rm -rf magento/generated/code/* magento/generated/metadata/* \
+           magento/var/cache/* magento/var/page_cache/* magento/var/view_preprocessed/* \
+           magento/var/log/* magento/var/report/* magento/var/tmp/* \
+           magento/pub/static/frontend/* magento/pub/static/adminhtml/* 2>/dev/null || true
+
+    echo "    (generated code and static assets rebuild on next request)"
+fi
+
+if [ "$DO_TESTS" -eq 1 ]; then
+    echo "==> Dropping integration-test schemas"
+    for schema in "${DB_TEST_NAME}" "${DB_TEST_NAME}_2"; do
+        db -e "DROP DATABASE IF EXISTS \`${schema}\`;
+               CREATE DATABASE \`${schema}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+               GRANT ALL PRIVILEGES ON \`${schema}\`.* TO '${DB_USER}'@'%';
+               FLUSH PRIVILEGES;" \
+            && echo "    reset ${schema}"
+    done
+    echo "    (next integration run reinstalls into them — expect a slow first run)"
+fi
+
+if [ "$DO_SEARCH" -eq 1 ]; then
+    echo "==> Deleting stale OpenSearch indices"
+    # Magento writes versioned indices (magento_product_1_v5, _v6, …) and never
+    # prunes the old ones. Query-log indices accumulate daily too.
+    stale=$(curl -s --max-time 10 "http://localhost:${OPENSEARCH_PORT}/_cat/indices?h=index" \
+            | grep -E "^(magento|top_queries)" | sort || true)
+    if [ -z "$stale" ]; then
+        echo "    nothing to delete"
+    else
+        for idx in $stale; do
+            curl -s -X DELETE --max-time 20 "http://localhost:${OPENSEARCH_PORT}/${idx}" >/dev/null \
+                && echo "    deleted ${idx}"
+        done
+        echo "==> Reindexing"
+        docker compose run --rm --user "$DC_USER" php php bin/magento indexer:reindex || true
+    fi
+fi
+
+echo
+echo "Done. bin/clean --status to see what is left."

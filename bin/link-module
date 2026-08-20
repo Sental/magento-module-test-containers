@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Symlink a module from $MODULES_PATH into the test install's app/code.
+#
+#   bin/link-module module-blog MageOS Blog
+#   bin/link-module <dir-under-MODULES_PATH> <Vendor> <Name>
+#
+# The link is written with the module's ABSOLUTE host path, which resolves
+# inside the container too because docker-compose.yml bind-mounts
+# $MODULES_PATH at the identical path. That is the whole trick that lets the
+# rig test a module living outside this directory.
+source "$(dirname "${BASH_SOURCE[0]}")/_bootstrap.sh"
+
+DIR="${1:?usage: bin/link-module <dir> <Vendor> <Name>}"
+VENDOR="${2:?usage: bin/link-module <dir> <Vendor> <Name>}"
+NAME="${3:?usage: bin/link-module <dir> <Vendor> <Name>}"
+
+SRC="${MODULES_PATH}/${DIR}"
+DEST="magento/app/code/${VENDOR}/${NAME}"
+
+[ -d "$SRC" ] || { echo "No such module directory: $SRC" >&2; exit 1; }
+[ -f "$SRC/registration.php" ] || echo "warning: $SRC has no registration.php" >&2
+
+mkdir -p "$(dirname "$DEST")"
+ln -sfn "$SRC" "$DEST"
+
+echo "linked  $DEST -> $SRC"
+echo
+echo "next:"
+echo "  bin/mage module:enable ${VENDOR}_${NAME}"
+echo "  bin/mage setup:upgrade"
+echo "  bin/mage setup:di:compile"

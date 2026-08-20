@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Remove a module symlink from the test install. The module's own repo is
+# untouched — `rm` on a symlink removes the link, never the target.
+#
+#   bin/unlink-module MageOS Blog
+#   bin/unlink-module MageOS Blog --keep-tables
+#
+# ORDER MATTERS. Magento's declarative schema drops a module's tables during
+# `setup:upgrade`, but only while the module is still listed in
+# app/etc/config.php. So we disable, upgrade (tables get dropped), and only
+# then remove the symlink. Removing the link first strands the tables.
+source "$(dirname "${BASH_SOURCE[0]}")/_bootstrap.sh"
+
+VENDOR="${1:?usage: bin/unlink-module <Vendor> <Name> [--keep-tables]}"
+NAME="${2:?usage: bin/unlink-module <Vendor> <Name> [--keep-tables]}"
+KEEP_TABLES=0
+[ "${3:-}" = "--keep-tables" ] && KEEP_TABLES=1
+
+MODULE="${VENDOR}_${NAME}"
+DEST="magento/app/code/${VENDOR}/${NAME}"
+
+if [ ! -L "$DEST" ]; then
+    if [ -d "$DEST" ]; then
+        echo "$DEST is a real directory, not a symlink — refusing to delete it." >&2
+        exit 1
+    fi
+    echo "Nothing linked at $DEST"
+    exit 0
+fi
+
+run() { docker compose run --rm --user "$DC_USER" php "$@"; }
+
+echo "==> Disabling ${MODULE}"
+run php bin/magento module:disable "${MODULE}" || true
+
+if [ "$KEEP_TABLES" -eq 0 ]; then
+    echo "==> setup:upgrade (declarative schema drops the module's tables)"
+    run php bin/magento setup:upgrade
+else
+    echo "==> Skipping setup:upgrade — tables left in place (--keep-tables)"
+fi
+
+rm -f "$DEST"
+rmdir "magento/app/code/${VENDOR}" 2>/dev/null || true
+
+echo "unlinked $DEST"
+[ "$KEEP_TABLES" -eq 1 ] && echo "note: ${MODULE}'s tables remain; bin/clean --status will show them"
+exit 0

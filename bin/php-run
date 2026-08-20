@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Run an arbitrary command in the php container as the host user.
+#   bin/php-run composer require foo/bar
+#   bin/php-run php -v
+source "$(dirname "${BASH_SOURCE[0]}")/_bootstrap.sh"
+exec docker compose run --rm --user "$DC_USER" php "$@"

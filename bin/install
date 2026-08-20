@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# One-shot installer for the rig. Safe to re-run: it will refuse to clobber an
+# existing install unless you pass --force (which drops the database).
+source "$(dirname "${BASH_SOURCE[0]}")/_bootstrap.sh"
+
+FORCE=0
+WITH_SAMPLE_DATA=1
+for arg in "$@"; do
+    case "$arg" in
+        --force) FORCE=1 ;;
+        --no-sample-data) WITH_SAMPLE_DATA=0 ;;
+        *) echo "unknown option: $arg" >&2; exit 1 ;;
+    esac
+done
+
+run() { docker compose run --rm --user "$DC_USER" php "$@"; }
+
+if [ -f magento/app/etc/env.php ] && [ "$FORCE" -eq 0 ]; then
+    echo "Already installed (magento/app/etc/env.php exists)."
+    echo "Re-run with --force to drop the database and reinstall."
+    exit 0
+fi
+
+# Create the bind-mount source ourselves. If Docker creates it, it does so as
+# root, and the non-root container user can then no longer write into it.
+mkdir -p magento
+
+# A fresh clone has no Mage-OS tree at all — only this repo's own files. Fetch
+# it before anything tries to run bin/magento.
+if [ ! -f magento/composer.json ]; then
+    echo "==> No Mage-OS tree found; creating the project (Mage-OS ${MAGEOS_VERSION})"
+    echo "    This is the long part — several minutes of downloads."
+    # COMPOSER_MAX_PARALLEL_HTTP=4 works around intermittent
+    # "curl error 18 ... HTTP/2 stream not closed cleanly" failures.
+    docker compose run --rm --user "$DC_USER" --no-deps \
+        -e COMPOSER_MAX_PARALLEL_HTTP=4 php \
+        composer create-project --no-interaction --prefer-dist \
+        --repository-url=https://repo.mage-os.org/ \
+        "mage-os/project-community-edition=${MAGEOS_VERSION}" /var/www/html
+fi
+
+if [ ! -f magento/bin/magento ]; then
+    echo "magento/bin/magento is missing — the project was not created correctly." >&2
+    echo "Try: rm -rf magento && bin/install" >&2
+    exit 1
+fi
+
+echo "==> Starting db + opensearch"
+docker compose up -d db opensearch
+
+echo "==> Waiting for services to report healthy"
+for _ in $(seq 1 60); do
+    db_ok=$(docker inspect --format '{{.State.Health.Status}}' "${COMPOSE_PROJECT_NAME}-db-1" 2>/dev/null || echo starting)
+    os_ok=$(docker inspect --format '{{.State.Health.Status}}' "${COMPOSE_PROJECT_NAME}-opensearch-1" 2>/dev/null || echo starting)
+    [ "$db_ok" = healthy ] && [ "$os_ok" = healthy ] && break
+    sleep 5
+done
+echo "    db=$db_ok opensearch=$os_ok"
+
+INSTALL_ARGS=(
+    setup:install
+    --base-url="${BASE_URL}"
+    --db-host=db
+    --db-name="${DB_NAME}"
+    --db-user="${DB_USER}"
+    --db-password="${DB_PASSWORD}"
+    --admin-firstname=Test
+    --admin-lastname=Admin
+    --admin-email="${ADMIN_EMAIL}"
+    --admin-user="${ADMIN_USER}"
+    --admin-password="${ADMIN_PASSWORD}"
+    --language="${STORE_LANGUAGE:-en_US}"
+    --currency="${STORE_CURRENCY:-GBP}"
+    --timezone="${STORE_TIMEZONE:-Europe/London}"
+    --use-rewrites=1
+    --backend-frontname="${ADMIN_URL}"
+    --search-engine=opensearch
+    --opensearch-host=opensearch
+    --opensearch-port=9200
+    --opensearch-index-prefix=magento
+    --cleanup-database
+)
+
+echo "==> Installing Mage-OS ${MAGEOS_VERSION}"
+run php bin/magento "${INSTALL_ARGS[@]}"
+
+if [ "$WITH_SAMPLE_DATA" -eq 1 ]; then
+    echo "==> Deploying sample data (slow — several minutes)"
+    run php bin/magento sampledata:deploy
+    run php bin/magento setup:upgrade
+fi
+
+echo "==> Developer mode + caches"
+run php bin/magento deploy:mode:set developer
+run php bin/magento indexer:reindex || true
+run php bin/magento cache:flush
+
+echo "==> Starting web"
+docker compose up -d web
+
+cat <<EOF
+
+Done.
+
+  Storefront : ${BASE_URL}
+  Admin      : ${BASE_URL}${ADMIN_URL}  (${ADMIN_USER} / ${ADMIN_PASSWORD})
+
+Link a module and enable it:
+
+  bin/link-module module-blog MageOS Blog
+  bin/mage module:enable MageOS_Blog
+  bin/mage setup:upgrade
+
+EOF

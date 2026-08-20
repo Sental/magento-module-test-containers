@@ -1,0 +1,34 @@
+# ---------------------------------------------------------------------------
+# The Mage-OS install itself — large, disposable, machine-specific.
+# Rebuild with `bin/install`. Never commit it.
+# ---------------------------------------------------------------------------
+/magento/
+
+# ---------------------------------------------------------------------------
+# Local configuration. .env holds machine-specific paths (MODULES_PATH) and
+# local credentials, so it stays out of the repo; .env.example is the template
+# that IS committed.
+# ---------------------------------------------------------------------------
+/.env
+/.env.local
+/docker-compose.override.yml
+
+# ---------------------------------------------------------------------------
+# Editor / OS noise
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+*~
+/.idea/
+/.vscode/
+/.fleet/
+
+# ---------------------------------------------------------------------------
+# Stray output
+# ---------------------------------------------------------------------------
+*.log
+/tmp/
+/backups/
+/*.sql
+/*.sql.gz

@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# Tear the rig down to nothing and rebuild it from .env + docker-compose.yml.
+#
+#   bin/reset              # full: volumes, install, everything
+#   bin/reset --db-only    # keep the vendor tree; wipe data and reinstall
+#   bin/reset --no-sample-data
+#   bin/reset --yes        # skip the confirmation prompt
+#
+# This is the blunt instrument. Everything in the rig is reproducible from
+# committed files, so when the install has drifted into a confusing state it is
+# usually cheaper to rebuild than to diagnose. For routine tidying that does
+# not cost 20 minutes, use bin/clean.
+source "$(dirname "${BASH_SOURCE[0]}")/_bootstrap.sh"
+
+DB_ONLY=0
+ASSUME_YES=0
+INSTALL_ARGS=()
+
+for arg in "$@"; do
+    case "$arg" in
+        --db-only) DB_ONLY=1 ;;
+        --yes|-y) ASSUME_YES=1 ;;
+        --no-sample-data) INSTALL_ARGS+=(--no-sample-data) ;;
+        *) echo "unknown option: $arg" >&2; exit 1 ;;
+    esac
+done
+
+# Anything linked in is about to be unlinked by the rebuild; list it so the
+# rebuild instructions at the end can name them.
+LINKED=()
+if [ -d magento/app/code ]; then
+    while IFS= read -r link; do
+        LINKED+=("$(echo "$link" | sed 's|magento/app/code/||; s|/| |')")
+    done < <(find magento/app/code -mindepth 2 -maxdepth 2 -type l 2>/dev/null)
+fi
+
+echo "This will destroy:"
+if [ "$DB_ONLY" -eq 1 ]; then
+    echo "  - the database and search index (docker volumes)"
+    echo "  - magento/app/etc/env.php (the install config)"
+    echo "  - KEEPING magento/vendor, so the rebuild skips the download"
+else
+    echo "  - all containers and volumes (database, search index, composer cache)"
+    echo "  - the entire magento/ tree ($(du -sh magento 2>/dev/null | cut -f1))"
+fi
+if [ ${#LINKED[@]} -gt 0 ]; then
+    echo
+    echo "Linked modules (their own repos are NOT touched):"
+    printf '  - %s\n' "${LINKED[@]}"
+fi
+echo
+echo "Nothing outside ${PWD} is affected. Modules in ${MODULES_PATH} are safe."
+echo
+
+if [ "$ASSUME_YES" -eq 0 ]; then
+    read -r -p "Type 'reset' to continue: " confirm
+    [ "$confirm" = "reset" ] || { echo "Aborted."; exit 1; }
+fi
+
+echo
+echo "==> Stopping containers and removing volumes"
+docker compose down -v --remove-orphans
+
+if [ "$DB_ONLY" -eq 1 ]; then
+    echo "==> Removing install config, keeping vendor"
+    rm -f magento/app/etc/env.php magento/app/etc/config.php
+    rm -rf magento/var/cache/* magento/var/page_cache/* magento/generated/* \
+           magento/pub/static/frontend/* magento/pub/static/adminhtml/* 2>/dev/null || true
+else
+    echo "==> Removing the magento tree"
+    # Delete the symlinks first so nothing can traverse into a module repo.
+    find magento/app/code -mindepth 2 -maxdepth 2 -type l -delete 2>/dev/null || true
+    rm -rf magento
+    # bin/install recreates the project when it finds no composer.json, which
+    # is the same path a fresh clone takes. One implementation, not two.
+fi
+
+echo "==> Installing"
+./bin/install --force "${INSTALL_ARGS[@]}"
+
+if [ ${#LINKED[@]} -gt 0 ]; then
+    echo
+    echo "Re-link what you were working on:"
+    for entry in "${LINKED[@]}"; do
+        set -- $entry
+        echo "  bin/link-module <dir-under-MODULES_PATH> $1 $2"
+    done
+fi

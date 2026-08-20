@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Run a module's integration tests against the rig.
+#
+#   bin/test-integration app/code/MageOS/Blog/Test/Integration
+#   bin/test-integration app/code/MageOS/Blog/Test/Integration/Model/PostsByProductTest.php
+#   bin/test-integration app/code/MageOS/Blog/Test/Integration --filter test_excludes_drafts
+#
+# Paths are relative to the Magento root inside the container (/var/www/html).
+#
+# On first run the framework installs a throwaway Magento into
+# $DB_TEST_NAME — that takes several minutes. Later runs reuse it.
+source "$(dirname "${BASH_SOURCE[0]}")/_bootstrap.sh"
+
+TARGET="${1:?usage: bin/test-integration <path under the Magento root> [phpunit args]}"
+shift || true
+
+CONFIG=dev/tests/integration/phpunit.xml
+[ -f "magento/${CONFIG}" ] || CONFIG=dev/tests/integration/phpunit.xml.dist
+
+exec docker compose run --rm --user "$DC_USER" php \
+    php -d memory_limit=-1 vendor/bin/phpunit -c "$CONFIG" "$TARGET" "$@"

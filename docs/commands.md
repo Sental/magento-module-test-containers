@@ -1,0 +1,208 @@
+# Command reference
+
+Every script lives in `bin/` and is run from the rig root. They all source
+`bin/_bootstrap.sh`, which moves to the rig root, creates `.env` from
+`.env.example` if missing, loads it, and validates `MODULES_PATH`.
+
+---
+
+## `bin/install`
+
+Builds the whole rig from nothing.
+
+```bash
+bin/install                    # with sample data (~20-30 min)
+bin/install --no-sample-data   # faster; empty catalogue
+bin/install --force            # DROPS the database and reinstalls
+```
+
+Refuses to run over an existing install unless `--force` is given. Locale,
+currency, and timezone come from `STORE_LANGUAGE` / `STORE_CURRENCY` /
+`STORE_TIMEZONE` in `.env` and can only be changed by reinstalling.
+
+---
+
+## `bin/reset`
+
+Destroys the rig and rebuilds it from `.env` + `docker-compose.yml`. The blunt
+instrument: everything here is reproducible from committed files, so a drifted
+install is usually cheaper to rebuild than to diagnose.
+
+```bash
+bin/reset                    # containers, volumes, magento/ — everything
+bin/reset --db-only          # keep magento/vendor; wipe data and reinstall
+bin/reset --no-sample-data   # faster rebuild
+bin/reset --yes              # skip the confirmation prompt
+```
+
+Prints exactly what it will destroy and requires you to type `reset` to
+proceed. Lists any linked modules first — their own repos are never touched —
+and prints the re-link commands at the end.
+
+`--db-only` skips the Composer download by keeping the vendor tree, which is
+the difference between roughly 10 minutes and 25.
+
+---
+
+## `bin/clean`
+
+Reclaims space without a rebuild. **Running it bare only reports** — every
+destructive action needs an explicit flag.
+
+```bash
+bin/clean            # report: disk, schemas, indices, volumes
+bin/clean --cache    # caches, generated code, logs, reports, static assets
+bin/clean --tests    # drop and recreate the integration-test schemas
+bin/clean --search   # delete stale OpenSearch indices, then reindex
+bin/clean --all      # all three
+```
+
+`--cache` is safe and routine: generated code and static assets rebuild on the
+next request. It typically recovers 10–15 MB and is the right first move when
+something behaves strangely.
+
+`--tests` matters more than it looks — the integration framework installs a
+complete Magento (~400 tables) into `magento_integration_tests` and never drops
+it. The next test run reinstalls, so expect one slow run afterwards.
+
+> **You do not need this to remove a module's tables.** See below.
+
+---
+
+## `bin/link-module <dir> <Vendor> <Name>`
+
+Symlinks a module from `$MODULES_PATH` into `magento/app/code/`.
+
+```bash
+bin/link-module module-blog MageOS Blog
+# magento/app/code/MageOS/Blog -> /srv/modules/module-blog
+```
+
+Warns if the source has no `registration.php`. Prints the enable/upgrade
+commands to run next.
+
+## `bin/unlink-module <Vendor> <Name>`
+
+Disables the module, drops its tables, and removes the symlink — in that order,
+which matters.
+
+```bash
+bin/unlink-module MageOS Blog
+bin/unlink-module MageOS Blog --keep-tables   # leave the data alone
+```
+
+Refuses to delete a real directory, so it can never eat a module that was
+copied in rather than linked. `rm` on a symlink removes the link, never the
+target, so the module's own repo is safe either way.
+
+### Why the order matters
+
+Magento's declarative schema drops a module's tables during `setup:upgrade`,
+but only while the module is still listed in `app/etc/config.php`. So the
+sequence is:
+
+1. `module:disable` — module stays in `config.php`, marked `0`
+2. `setup:upgrade` — declarative schema sees its tables are no longer declared and **drops them**
+3. remove the symlink
+
+Remove the symlink first and the tables are stranded: Magento no longer knows
+they exist, and nothing will clean them up. This is handled for you, but it is
+worth knowing if you ever unlink something by hand.
+
+Verified on this rig: 11 `mageos_blog_*` tables, dropped to 0 by
+`module:disable` + `setup:upgrade`, and recreated on re-enable.
+
+---
+
+## `bin/mage <args…>`
+
+`bin/magento` inside the container.
+
+```bash
+bin/mage cache:flush
+bin/mage setup:upgrade
+bin/mage setup:di:compile
+bin/mage module:status MageOS_Blog
+bin/mage config:set mageos_blog/general/enabled 1
+bin/mage indexer:reindex
+bin/mage cache:disable full_page
+```
+
+---
+
+## `bin/test-integration <path> [phpunit args…]`
+
+Runs integration tests. Paths are relative to the Magento root **inside the
+container** (`/var/www/html`), so a linked module is reached through
+`app/code/`:
+
+```bash
+bin/test-integration app/code/MageOS/Blog/Test/Integration
+bin/test-integration app/code/MageOS/Blog/Test/Integration/Model/PostsByProductTest.php
+bin/test-integration app/code/MageOS/Blog/Test/Integration --filter test_excludes_drafts
+```
+
+> **First run is slow.** The framework installs a second, throwaway Magento
+> into the `magento_integration_tests` schema. It owns and recreates that
+> schema — never repoint it at a database you care about.
+
+---
+
+## `bin/php-run <command…>`
+
+Any command in the PHP container, as your host user.
+
+```bash
+bin/php-run composer require --dev foo/bar
+bin/php-run composer show mage-os/module-catalog
+bin/php-run php -v
+bin/php-run php -i | grep opcache
+bin/php-run vendor/bin/phpunit --version
+```
+
+---
+
+## `bin/dc <args…>`
+
+Raw `docker compose`, always resolved from the rig root so it works from any
+directory.
+
+```bash
+bin/dc ps
+bin/dc logs -f web
+bin/dc logs --tail 100 php
+bin/dc restart php
+bin/dc up -d
+bin/dc down          # stop, keep data
+bin/dc down -v       # stop and DELETE database + search index
+bin/dc exec db mariadb -uroot -proot magento
+```
+
+---
+
+## Common one-liners
+
+Database shell:
+
+```bash
+bin/dc exec db mariadb -uroot -proot magento
+```
+
+Query directly:
+
+```bash
+bin/dc exec -T db mariadb -uroot -proot magento -e "select count(*) from catalog_product_entity;"
+```
+
+Watch a Magento log:
+
+```bash
+tail -f magento/var/log/system.log
+tail -f magento/var/log/exception.log
+```
+
+Full reset:
+
+```bash
+bin/dc down -v && rm -rf magento && bin/install
+```
