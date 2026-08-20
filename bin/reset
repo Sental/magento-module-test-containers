@@ -25,13 +25,15 @@ for arg in "$@"; do
     esac
 done
 
-# Anything linked in is about to be unlinked by the rebuild; list it so the
-# rebuild instructions at the end can name them.
+# Anything mounted in is about to be unmounted by the rebuild; read it from the
+# registry so the instructions at the end can name them. (This used to scan for
+# symlinks under app/code, which finds nothing now that modules are mounted.)
 LINKED=()
-if [ -d magento/app/code ]; then
-    while IFS= read -r link; do
-        LINKED+=("$(echo "$link" | sed 's|magento/app/code/||; s|/| |')")
-    done < <(find magento/app/code -mindepth 2 -maxdepth 2 -type l 2>/dev/null)
+if [ -s "$LINKED_REGISTRY" ]; then
+    while read -r dir vendor name; do
+        [ -z "${dir:-}" ] && continue
+        LINKED+=("${dir} ${vendor} ${name}")
+    done < "$LINKED_REGISTRY"
 fi
 
 echo "This will destroy:"
@@ -61,6 +63,15 @@ echo
 echo "==> Stopping containers and removing volumes"
 docker compose down -v --remove-orphans
 
+# Drop the module mounts for the rebuild. Leaving them in place would have
+# Docker create mount points inside a magento/ tree that does not exist yet —
+# as root — which breaks the install partway through with a permissions error.
+# Modules are re-mounted at the end.
+if [ -f docker-compose.override.yml ]; then
+    echo "==> Removing module mounts for the rebuild"
+    rm -f docker-compose.override.yml
+fi
+
 if [ "$DB_ONLY" -eq 1 ]; then
     echo "==> Removing install config, keeping vendor"
     rm -f magento/app/etc/env.php magento/app/etc/config.php
@@ -68,7 +79,8 @@ if [ "$DB_ONLY" -eq 1 ]; then
            magento/pub/static/frontend/* magento/pub/static/adminhtml/* 2>/dev/null || true
 else
     echo "==> Removing the magento tree"
-    # Delete the symlinks first so nothing can traverse into a module repo.
+    # Clear any legacy symlinks first so nothing can traverse into a module repo.
+    # (Bind mounts were already dropped above with the override file.)
     find magento/app/code -mindepth 2 -maxdepth 2 -type l -delete 2>/dev/null || true
     rm -rf magento
     # bin/install recreates the project when it finds no composer.json, which
@@ -80,9 +92,15 @@ echo "==> Installing"
 
 if [ ${#LINKED[@]} -gt 0 ]; then
     echo
-    echo "Re-link what you were working on:"
+    echo "==> Re-mounting the modules that were linked before the reset"
     for entry in "${LINKED[@]}"; do
+        # shellcheck disable=SC2086
         set -- $entry
-        echo "  bin/link-module <dir-under-MODULES_PATH> $1 $2"
+        echo "    ${2}_${3}"
+        ./bin/link-module "$1" "$2" "$3" >/dev/null
+        docker compose run --rm --user "$DC_USER" php \
+            php bin/magento module:enable "${2}_${3}" >/dev/null 2>&1 || true
     done
+    docker compose run --rm --user "$DC_USER" php php bin/magento setup:upgrade >/dev/null
+    echo "    re-mounted and enabled; run bin/mage setup:di:compile if you need it"
 fi
