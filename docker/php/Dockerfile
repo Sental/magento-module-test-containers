@@ -19,6 +19,11 @@ RUN docker-php-ext-configure gd --with-freetype --with-jpeg --with-webp \
     && docker-php-ext-install -j"$(nproc)" \
         bcmath gd intl mbstring pdo_mysql soap sockets sodium xsl zip opcache
 
+# pcov, not xdebug: code coverage is needed for PHPUnit --coverage and for
+# Infection mutation testing, and pcov is far faster for coverage-only work.
+# Without a coverage driver Infection cannot run at all.
+RUN pecl install pcov && docker-php-ext-enable pcov
+
 # Composer 2 from the official image.
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 

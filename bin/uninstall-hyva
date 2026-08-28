@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Removes Hyvä from the rig.
+#
+# Order matters, the same way it does in bin/unlink-module. The active theme is
+# switched back to Luma FIRST: remove the packages while a store still points at
+# Hyva/default and every storefront request 500s on a theme whose files are
+# gone, which also makes the follow-up setup:upgrade harder to reason about.
+source "$(dirname "${BASH_SOURCE[0]}")/_bootstrap.sh"
+
+KEEP_AUTH=0
+FALLBACK_THEME="Magento/luma"
+for arg in "$@"; do
+    case "$arg" in
+        --keep-auth) KEEP_AUTH=1 ;;
+        --theme=*) FALLBACK_THEME="${arg#*=}" ;;
+        *) echo "unknown option: $arg" >&2; exit 1 ;;
+    esac
+done
+
+run() { docker compose run --rm --user "$DC_USER" php "$@"; }
+
+if [ ! -f magento/app/etc/env.php ]; then
+    echo "No install found — nothing to uninstall." >&2
+    exit 1
+fi
+
+if [ ! -d magento/vendor/hyva-themes ]; then
+    echo "Hyvä is not installed (no vendor/hyva-themes)."
+    exit 0
+fi
+
+echo "==> Switching the active theme back to ${FALLBACK_THEME}"
+THEME_ID="$(docker compose exec -T db \
+    mariadb -u"${DB_USER}" -p"${DB_PASSWORD}" -N -B "${DB_NAME}" \
+    -e "SELECT theme_id FROM theme WHERE theme_path = '${FALLBACK_THEME}' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+
+if [ -z "$THEME_ID" ]; then
+    echo "Could not find '${FALLBACK_THEME}' to fall back to — refusing to remove" >&2
+    echo "the packages while the store may still point at Hyvä." >&2
+    echo "Pass --theme=<path> naming a theme that exists." >&2
+    exit 1
+fi
+
+run php bin/magento config:set design/theme/theme_id "$THEME_ID"
+
+# Also clear any store- or website-scope overrides still naming a Hyvä theme,
+# which the default-scope value above does not reach.
+docker compose exec -T db \
+    mariadb -u"${DB_USER}" -p"${DB_PASSWORD}" -B "${DB_NAME}" -e "
+    DELETE FROM core_config_data
+    WHERE path = 'design/theme/theme_id'
+      AND scope <> 'default'
+      AND value IN (SELECT theme_id FROM theme WHERE theme_path LIKE 'Hyva%');" \
+    || echo "    (could not clear scoped overrides — check Content > Design > Configuration)"
+
+run php bin/magento cache:flush
+
+echo "==> Removing Hyvä packages"
+# Every hyva-themes/* package currently required at the top level, so this also
+# takes out compatibility modules installed alongside the theme.
+HYVA_PACKAGES="$(run composer show --name-only --direct 2>/dev/null \
+    | tr -d '\r' | grep '^hyva-themes/' || true)"
+
+if [ -n "$HYVA_PACKAGES" ]; then
+    # shellcheck disable=SC2086
+    run composer remove --no-interaction $HYVA_PACKAGES
+else
+    echo "    No top-level hyva-themes/* requirements found; skipping composer remove."
+fi
+
+echo "==> Removing repository configuration"
+run composer config --unset repositories.hyva-themes || true
+
+if [ "$KEEP_AUTH" -eq 0 ] && [ -n "${HYVA_REPO_URL:-}" ]; then
+    AUTH_HOST="$(printf '%s' "$HYVA_REPO_URL" | sed -E 's|^https?://||; s|/.*$||')"
+    echo "==> Removing stored credentials for ${AUTH_HOST}"
+    run composer config --auth --unset "http-basic.${AUTH_HOST}" || true
+fi
+
+echo "==> setup:upgrade"
+run php bin/magento setup:upgrade
+run php bin/magento cache:flush
+
+cat <<EOF
+
+Done. Storefront is back on ${FALLBACK_THEME}.
+
+Rows for the removed themes may remain in the \`theme\` table. They are inert —
+Magento re-registers themes from the filesystem — and disappear on bin/reset.
+
+EOF

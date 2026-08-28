@@ -42,7 +42,17 @@ bin/test-integration <path> [phpunit args] # integration tests
 bin/dc <docker compose args>               # raw compose from the rig root
 bin/clean [--cache|--tests|--search|--all] # bare = report only
 bin/reset [--db-only] [--no-sample-data]   # destroy and rebuild
+
+bin/install-hyva [--no-activate] [--theme=] # add Hyvä (needs licence creds in .env)
+bin/uninstall-hyva [--keep-auth]            # remove Hyvä, back to Luma
+bin/hyva-build [--skip-config]              # hyva:config:generate + rebuild Tailwind
 ```
+
+Testing a Hyvä compatibility module needs `bin/install-hyva` first — without
+Hyvä present, `setup:di:compile` fails on any `di.xml` naming a `Hyva\…` class.
+Its **templates work on a cache flush; its styling does not**: the CSS only
+exists after `bin/hyva-build` puts the module into `hyva-themes.json` and
+recompiles the theme.
 
 `bin/test-integration` paths are relative to the Magento root **inside the
 container** (`/var/www/html`), so a linked module is reached via `app/code/`:

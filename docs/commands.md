@@ -22,6 +22,66 @@ currency, and timezone come from `STORE_LANGUAGE` / `STORE_CURRENCY` /
 
 ---
 
+## `bin/install-hyva`
+
+Adds Hyvä to an existing install and activates the default theme. Needed to test
+a Hyvä compatibility module — without it, `setup:di:compile` fails on any
+`di.xml` naming a `Hyva\…` class.
+
+```bash
+bin/install-hyva                      # install + activate Hyva/default
+bin/install-hyva --no-activate        # install, leave the storefront on Luma
+bin/install-hyva --theme=Magento/luma # switch the active theme back
+```
+
+Hyvä is commercial and on no public repository, so this reads `HYVA_REPO_URL`,
+`HYVA_AUTH_USER` and `HYVA_AUTH_TOKEN` from `.env` — your own licence
+credentials. It refuses to run without them rather than guessing.
+
+Only the default scope is set. A store view with its own theme override keeps
+it; change those under **Content > Design > Configuration**.
+
+---
+
+## `bin/uninstall-hyva`
+
+Removes Hyvä and puts the storefront back on Luma.
+
+```bash
+bin/uninstall-hyva               # back to Magento/luma
+bin/uninstall-hyva --keep-auth   # leave the stored composer credentials
+```
+
+**Order matters, as with `bin/unlink-module`.** The theme is switched back
+*first* — including any store-scope overrides naming a Hyvä theme — because
+removing the packages while a store still points at `Hyva/default` makes every
+storefront request 500 on a theme whose files are gone.
+
+Rows for the removed themes stay in the `theme` table. They are inert; Magento
+re-registers themes from the filesystem.
+
+---
+
+## `bin/hyva-build`
+
+Regenerates `app/etc/hyva-themes.json` and rebuilds the theme's Tailwind CSS.
+
+```bash
+bin/hyva-build                                  # default theme
+bin/hyva-build --theme-dir=app/design/frontend/Acme/theme
+bin/hyva-build --skip-config                    # CSS only
+```
+
+A compatibility module's **templates work on a cache flush; its styling does
+not** — the CSS only exists once the module is listed in `hyva-themes.json` and
+the theme has been rebuilt. This is the usual reason a module looks
+half-applied.
+
+The php image has no node, so the build runs in a throwaway `node:22-alpine`
+container over the same `magento/` tree.
+
+---
+
 ## `bin/reset`
 
 Destroys the rig and rebuilds it from `.env` + `docker-compose.yml`. The blunt

@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Rebuilds a Hyvä theme's Tailwind CSS, and first regenerates the module list it
+# is built from.
+#
+# Two steps, because a compatibility module's styling depends on both and only
+# the templates are covered by a cache flush:
+#
+#   hyva:config:generate  writes app/etc/hyva-themes.json from the modules
+#                         registered in CompatModuleRegistry
+#   npm run build         runs `hyva-sources` (which reads that json into
+#                         web/tailwind/generated/hyva-source.css) and compiles
+#
+# The php image has no node — Hyvä 3 needs node >= 20 for Tailwind 4 — so the
+# build runs in a throwaway node container over the same magento/ tree rather
+# than bloating the php image or adding a compose service.
+source "$(dirname "${BASH_SOURCE[0]}")/_bootstrap.sh"
+
+THEME_DIR="vendor/hyva-themes/magento2-default-theme"
+NODE_IMAGE="node:22-alpine"
+SKIP_CONFIG=0
+for arg in "$@"; do
+    case "$arg" in
+        --skip-config) SKIP_CONFIG=1 ;;
+        --theme-dir=*) THEME_DIR="${arg#*=}" ;;
+        *) echo "unknown option: $arg" >&2; exit 1 ;;
+    esac
+done
+
+run() { docker compose run --rm --user "$DC_USER" php "$@"; }
+
+TAILWIND_DIR="magento/${THEME_DIR}/web/tailwind"
+if [ ! -f "${TAILWIND_DIR}/package.json" ]; then
+    echo "No Tailwind sources at ${TAILWIND_DIR}." >&2
+    echo "Is Hyvä installed? Try bin/install-hyva, or pass --theme-dir=<path>" >&2
+    echo "relative to the Magento root (e.g. app/design/frontend/Acme/theme)." >&2
+    exit 1
+fi
+
+if [ "$SKIP_CONFIG" -eq 0 ]; then
+    echo "==> hyva:config:generate"
+    run php bin/magento hyva:config:generate
+fi
+
+echo "==> Building Tailwind in ${THEME_DIR} (${NODE_IMAGE})"
+NPM_INSTALL="npm ci"
+[ -d "${TAILWIND_DIR}/node_modules" ] && NPM_INSTALL="npm install --no-audit --no-fund"
+
+docker run --rm \
+    --user "$DC_USER" \
+    -v "$(pwd)/magento:/app" \
+    -w "/app/${THEME_DIR}/web/tailwind" \
+    -e HOME=/tmp \
+    "$NODE_IMAGE" \
+    sh -c "${NPM_INSTALL} && npm run build"
+
+run php bin/magento cache:flush
+
+cat <<EOF
+
+Done. Rebuilt ${THEME_DIR}/web/css/styles.css
+
+If a module's styles are still missing, check it actually reached the build:
+
+  grep your-module magento/app/etc/hyva-themes.json
+  grep your-module magento/${THEME_DIR}/web/tailwind/generated/hyva-source.css
+
+An absent entry means the module is not registered in CompatModuleRegistry, or
+its CSS is not at view/frontend/tailwind/module.css.
+
+EOF

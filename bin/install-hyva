@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# Adds Hyvä to an existing rig install and, by default, activates the default
+# theme.
+#
+# Hyvä is commercial and on no public repository, so this needs your own
+# credentials in .env (HYVA_REPO_URL, HYVA_AUTH_USER, HYVA_AUTH_TOKEN). Nothing
+# here ships or stores a licence.
+#
+# Safe to re-run: composer config is idempotent and composer require resolves to
+# whatever is already installed.
+source "$(dirname "${BASH_SOURCE[0]}")/_bootstrap.sh"
+
+ACTIVATE=1
+THEME_PATH="Hyva/default"
+for arg in "$@"; do
+    case "$arg" in
+        --no-activate) ACTIVATE=0 ;;
+        --theme=*) THEME_PATH="${arg#*=}" ;;
+        *) echo "unknown option: $arg" >&2; exit 1 ;;
+    esac
+done
+
+run() { docker compose run --rm --user "$DC_USER" php "$@"; }
+
+if [ ! -f magento/app/etc/env.php ]; then
+    echo "No install found. Run bin/install first." >&2
+    exit 1
+fi
+
+: "${HYVA_REPO_URL:=}"
+: "${HYVA_AUTH_USER:=token}"
+: "${HYVA_AUTH_TOKEN:=}"
+
+if [ -z "$HYVA_REPO_URL" ] || [ -z "$HYVA_AUTH_TOKEN" ]; then
+    cat >&2 <<'EOF'
+Hyvä credentials are not set. Add these to .env:
+
+  HYVA_REPO_URL=https://hyva-themes.repo.packagist.com/your-account/
+  HYVA_AUTH_USER=token
+  HYVA_AUTH_TOKEN=your-private-packagist-token
+
+They come from your own Hyvä licence — see https://docs.hyva.io. Do not copy
+them out of another project's auth.json; the token is tied to a licence.
+EOF
+    exit 1
+fi
+
+# The auth host is the repo host, not the full URL.
+AUTH_HOST="$(printf '%s' "$HYVA_REPO_URL" | sed -E 's|^https?://||; s|/.*$||')"
+
+echo "==> Configuring the Hyvä repository (${AUTH_HOST})"
+run composer config repositories.hyva-themes composer "$HYVA_REPO_URL"
+run composer config --auth "http-basic.${AUTH_HOST}" "$HYVA_AUTH_USER" "$HYVA_AUTH_TOKEN"
+
+# magento2-default-theme pulls in the theme module, the reset theme and the
+# theme fallback. The compat-module fallback is required explicitly: it is what
+# lets a compatibility module override another module's view files, and it is
+# not a dependency of the theme.
+echo "==> Requiring Hyvä packages (slow — several minutes)"
+run composer require --no-interaction \
+    hyva-themes/magento2-default-theme \
+    hyva-themes/magento2-compat-module-fallback
+
+echo "==> setup:upgrade"
+run php bin/magento setup:upgrade
+
+if [ "$ACTIVATE" -eq 0 ]; then
+    echo
+    echo "Hyvä installed. Theme not activated (--no-activate)."
+    exit 0
+fi
+
+# There is no core CLI to set a theme by path — design/theme/theme_id takes the
+# numeric id — so resolve it from the theme table.
+echo "==> Resolving theme id for ${THEME_PATH}"
+THEME_ID="$(docker compose exec -T db \
+    mariadb -u"${DB_USER}" -p"${DB_PASSWORD}" -N -B "${DB_NAME}" \
+    -e "SELECT theme_id FROM theme WHERE theme_path = '${THEME_PATH}' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+
+if [ -z "$THEME_ID" ]; then
+    echo "No theme with path '${THEME_PATH}'. Installed themes:" >&2
+    docker compose exec -T db \
+        mariadb -u"${DB_USER}" -p"${DB_PASSWORD}" -N -B "${DB_NAME}" \
+        -e "SELECT theme_path FROM theme ORDER BY theme_path;" >&2 || true
+    echo >&2
+    echo "Pass --theme=<path> if yours differs." >&2
+    exit 1
+fi
+
+echo "==> Activating ${THEME_PATH} (theme_id=${THEME_ID})"
+run php bin/magento config:set design/theme/theme_id "$THEME_ID"
+run php bin/magento cache:flush
+
+cat <<EOF
+
+Done.
+
+  Storefront : ${BASE_URL}   (now rendering ${THEME_PATH})
+
+A store view with its own theme override still renders whatever it was set to;
+change those in admin under Content > Design > Configuration.
+
+A Hyvä compatibility module needs its Tailwind picked up as well as its
+templates — templates work on a cache flush, styling does not:
+
+  bin/mage hyva:config:generate      # adds the module to app/etc/hyva-themes.json
+  bin/hyva-build                     # rebuild the theme CSS
+
+Back to Luma: bin/install-hyva --theme=Magento/luma
+Remove entirely: bin/uninstall-hyva
+
+EOF
